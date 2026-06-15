@@ -56,7 +56,45 @@ For each hit, ask: **do two concurrent callers break the invariant?**
 | two locks in different orders | deadlock | total acquisition order |
 | cache "check then set" | cache stampede / lost update | per-key lock or atomic set |
 
-## Step 3 — Apply the idiomatic guard
+## Step 3 — Reuse before you build
+
+Before writing a new guard, **search the repo for one that already exists** — in
+any language. Reusing the project's own abstraction beats a fresh guard that
+drifts from it. Look for two things: an existing version of the guard you need,
+and existing implementations of the *other* guards you could apply instead.
+
+```bash
+# locks / mutual exclusion already in the codebase
+rg -in "mutex|\bLock\(|synchronized|select_for_update|lockForUpdate|FOR UPDATE|with_lock"
+
+# debounce / throttle / single-flight / click-handler
+rg -in "debounce|throttle|single.?flight|in.?flight|isSubmitting|ClickHandler"
+
+# idempotency / dedup middleware or keys
+rg -in "idempoten|dedup|idempotency.?key"
+
+# atomic update / upsert / optimistic version + unique constraints
+rg -in "ON CONFLICT|upsert|@Version|lock_version|ConcurrencyCheck|UNIQUE|unique=True|unique: true"
+```
+
+Where the project's own guard tends to live, by ecosystem:
+
+| Ecosystem | Look for |
+|---|---|
+| Python | `select_for_update`, `F()` helpers, a shared `Lock`/`asyncio.Lock` util, `unique=True` |
+| JS/TS | `async-mutex`, a `Mutex`/`Semaphore` util, an idempotency middleware, a debounce in utils |
+| Java/Kotlin | `@Version` entities, `ReentrantLock` wrappers, `@GuardedBy` fields, a coroutine `Mutex` |
+| C#/.NET | `SemaphoreSlim` helpers, `[ConcurrencyCheck]`/`rowversion`, an `Interlocked` util |
+| Go | a `sync.Mutex`/`errgroup` helper, `singleflight.Group`, `SELECT ... FOR UPDATE` |
+| Rust | `Arc<Mutex<…>>` wrappers, an `AtomicUsize` util, a `sqlx` atomic-update helper |
+| Ruby/Rails | `with_lock`, `lock_version` columns, `find_or_create_by` + unique index |
+| PHP/Laravel | `lockForUpdate`, `Cache::lock`, unique-index migrations |
+| Dart/Flutter | `package:synchronized` `Lock`, a debounce/`ClickHandler`, a single-flight util |
+
+If found, **apply the existing one** and stop. Add a new guard only when none
+exists — and put it where the project keeps shared utilities, not inline.
+
+## Step 4 — Apply the idiomatic guard
 
 Go to `references/<language>.md`, find the `BAD→GOOD` example for the class and
 adapt it. Golden rule per layer:
@@ -70,7 +108,7 @@ adapt it. Golden rule per layer:
 - **Across processes/replicas** → distributed lock with a **fencing token** or
   serialization in the database. Never a process mutex.
 
-## Step 4 — Prove it with a concurrency test
+## Step 5 — Prove it with a concurrency test
 
 Without a concurrent test, the fix is faith. Write the test **before/alongside**
 the fix:
@@ -84,7 +122,7 @@ The skeleton in each language's framework is in `references/<language>.md`
 (section "Prove the guard"). Universal pattern: set up state → simultaneous
 launch of N operations → assert the invariant.
 
-## Step 5 — Wire the detector into CI
+## Step 6 — Wire the detector into CI
 
 Add the language detector to the pipeline (`references/lint-detectors.md`):
 
@@ -98,7 +136,7 @@ Add the language detector to the pipeline (`references/lint-detectors.md`):
 A green detector does **not** prove the absence of a logical race in the
 database — only the concurrency test and the review catch that. Use both.
 
-## Step 6 — Final review
+## Step 7 — Final review
 
 Run the `SKILL.md` checklist. Points that most often slip through:
 

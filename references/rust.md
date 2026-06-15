@@ -4,27 +4,24 @@
 
 Rust is the rare case where the **compiler blocks memory data races at compile
 time**. The borrow checker guarantees "one mutable reference XOR several
-immutable ones", and the `Send`/`Sync` traits control what can cross threads: a
-type only moves to another thread if it is `Send`, and is only shared by
-reference if it is `Sync`. `Rc<T>` is not `Send` (non-atomic refcount), so the
-code simply does not compile — you are forced to `Arc<T>`. What **remains** is
-everything the type cannot see: **logical** race (check-then-act over data that
-each one locks in isolation), **deadlock** by lock order, and the race at the
-**database** layer.
+immutable ones", and `Send`/`Sync` control what crosses threads: a type moves to
+another thread only if `Send`, and is shared by reference only if `Sync`.
+`Rc<T>` is not `Send` (non-atomic refcount), so the code won't compile — you are
+forced to `Arc<T>`. What **remains** is everything the type cannot see:
+**logical** race (check-then-act over data each one locks in isolation),
+**deadlock** by lock order, and the race at the **database** layer.
 
 ## The races you will encounter
 
-- **Memory data race** — in safe code it is **impossible by construction**;
-  what exists is in `unsafe`, FFI, or wrong use of `*const`/`*mut`. For that
-  residue there is Miri.
-- **Logical race** — two locks/atomics individually correct, but the sequence
-  between them is not atomic (e.g.: `if map.lock().is_empty() { ... }` and then a
-  second lock based on that already stale read). The compiler does not see it.
-- **Deadlock** — two `Mutex` locked in opposite orders in different threads;
-  or locking the **same** `std::sync::Mutex` twice in the same thread (it is not
-  reentrant → locks forever).
+- **Memory data race** — in safe code, **impossible by construction**; it exists
+  only in `unsafe`, FFI, or wrong use of `*const`/`*mut`. For that residue, Miri.
+- **Logical race** — two locks/atomics each correct, but the sequence between
+  them is not atomic (e.g. `if map.lock().is_empty() { ... }` then a second lock
+  based on that already-stale read). The compiler does not see it.
+- **Deadlock** — two `Mutex` locked in opposite orders across threads; or locking
+  the **same** `std::sync::Mutex` twice in one thread (not reentrant → locks forever).
 - **Database race** — N processes/replicas: check-then-act in SQL is a lost update,
-  exactly like in any other language. See `references/databases-sql.md`.
+  exactly as in any other language. See `references/databases-sql.md`.
 
 ## How to avoid
 
@@ -96,23 +93,23 @@ state.lock().await.apply(resp);                  // re-lock only for the write
 |---|---|
 | `AtomicUsize`/`AtomicBool` + `fetch_add`/`compare_exchange` | counter, flag, simple lock-free; a single value with no associated data |
 | `Arc<Mutex<T>>` | mutable state shared across threads; serialized writes |
-| `Arc<RwLock<T>>` | many reads, few writes; readers run concurrently with each other |
+| `Arc<RwLock<T>>` | many reads, few writes; readers run concurrently |
 | `mpsc::channel` / `crossbeam::channel` | share-by-communicating; transfers ownership, avoids shared lock |
 | `tokio::sync::Mutex` / `RwLock` | async: guard is `Send` and can (but avoid) cross `.await` |
 | `tokio::sync::mpsc` / `oneshot` | pass values between async tasks |
-| `OnceLock` / `OnceCell` / `LazyLock` | single, thread-safe init (without the manual double-check) |
+| `OnceLock` / `OnceCell` / `LazyLock` | single, thread-safe init (no manual double-check) |
 | `parking_lot::Mutex` | faster mutex, no `PoisonError`; guard is not reentrant |
 | `compare_exchange` / `compare_exchange_weak` | CAS for lock-free lost update (retry in a loop) |
 | `Ordering::Relaxed` / `Acquire`+`Release` / `SeqCst` | pure counter / publish-read data via flag / when in doubt |
 
-`Ordering` rule: `Relaxed` only when the atomic does not synchronize **any other
-data** (isolated counter). To publish data ("I wrote the buffer, now I set the
-flag"), use `Release` on the store and `Acquire` on the load. When in doubt, `SeqCst`.
+`Ordering` rule: `Relaxed` only when the atomic synchronizes **no other data**
+(isolated counter). To publish data ("I wrote the buffer, now I set the flag"),
+use `Release` on the store and `Acquire` on the load. When in doubt, `SeqCst`.
 
 ## Prove the guard
 
 Launch N simultaneous threads with `Barrier` over the **same** resource and assert
-the invariant. Without a barrier the threads may not even overlap.
+the invariant. Without a barrier the threads may not overlap.
 
 ```rust
 use std::sync::{Arc, Barrier};
@@ -149,9 +146,9 @@ fn counter_has_no_lost_updates() {
 }
 ```
 
-Swap `fetch_add` for a separate `load`/`store` to watch the test fail — that is
-how you confirm it actually detects the race. Run with
-`cargo test --release` and several times; debug mode sometimes does not open the window.
+Swap `fetch_add` for a separate `load`/`store` to watch the test fail — that
+confirms it actually detects the race. Run with `cargo test --release` several
+times; debug mode sometimes does not open the window.
 
 ## Lint & static detection
 
@@ -169,8 +166,8 @@ cargo +nightly miri test
 ```
 
 For **lock-free code** (structures with hand-rolled atomics and `Ordering`), `loom`
-exhaustively tests the interleavings allowed by the memory model — it catches
-ordering bugs that `cargo test` never reproduces on your machine:
+exhaustively tests the interleavings the memory model allows — it catches ordering
+bugs that `cargo test` never reproduces on your machine:
 
 ```rust
 // Cargo.toml: loom = "0.7" under [target.'cfg(loom)'.dependencies]
@@ -185,9 +182,9 @@ fn lock_free_is_sound() {
 ```
 
 What they do **NOT** catch: **logical** race (two correct locks in a wrong
-sequence) and **database** race. Clippy does not model the sequence between critical
-sections; Miri/loom only look at memory, not SQL. That comes out in a concurrency
-test + review.
+sequence) and **database** race. Clippy does not model the sequence between
+critical sections; Miri/loom look only at memory, not SQL. That comes out in a
+concurrency test + review.
 
 ## Rust-specific anti-patterns
 
@@ -196,13 +193,13 @@ test + review.
   garbage. Use `Release`/`Acquire`.
 - **Holding a `MutexGuard` across `.await`** with `tokio::sync::Mutex`:
   serializes all tasks on that lock. Close the critical section before the await.
-- **`std::sync::Mutex` in async code** — blocks the entire runtime thread;
-  if locked twice in the same task, deadlock. Use `tokio::sync::Mutex` when
-  the guard crosses await, `std::sync::Mutex` only for very short sections without await.
-- **Locking the same `Mutex` twice in the same thread** — `std::sync::Mutex` is not
+- **`std::sync::Mutex` in async code** — blocks the entire runtime thread; locked
+  twice in the same task, deadlock. Use `tokio::sync::Mutex` when the guard crosses
+  await, `std::sync::Mutex` only for very short sections without await.
+- **Locking the same `Mutex` twice in one thread** — `std::sync::Mutex` is not
   reentrant: immediate deadlock, not panic.
-- **Two `Mutex` in inconsistent order** across threads → classic deadlock.
-  Impose a total acquisition order (e.g.: always by increasing address/id).
+- **Two `Mutex` in inconsistent order** across threads → classic deadlock. Impose a
+  total acquisition order (e.g. always by increasing address/id).
 - **`Mutex<bool>`/`Mutex<usize>` for a single value** — clippy warns
   (`mutex_atomic`); an `AtomicBool`/`AtomicUsize` is cheaper and has no poison.
 - **`.lock().unwrap()` ignoring `PoisonError`** — a panic with the lock held
@@ -210,6 +207,6 @@ test + review.
 - **Manual double-checked locking** for single init — use `OnceLock`/`LazyLock`;
   the hand-rolled version gets the `Ordering` wrong almost every time.
 - **Reimplementing a distributed lock in memory** in a service with N replicas — the
-  `Arc<Mutex>` only serializes **one** process. The multi-replica guard is in the database:
+  `Arc<Mutex>` serializes **one** process only. The multi-replica guard is in the database:
   `UPDATE ... WHERE`, `UNIQUE` constraint, `SELECT ... FOR UPDATE`. With `sqlx`,
   the check-then-act becomes a single atomic `query!` — see `references/databases-sql.md`.

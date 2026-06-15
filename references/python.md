@@ -2,26 +2,26 @@
 
 ## Concurrency model
 
-The **GIL serializes bytecode**, so there is no Python object corruption from two
-opcodes at the same time — but it **releases** on I/O calls (socket, disk,
-DB driver) and at every `await` point. Every race in Python is **logical**: a
-read-decide-write sequence crosses a blocking call or an `await`, another
-thread/task enters the window and the invariant breaks. `multiprocessing` has no
-GIL across processes: that is where there is real shared memory/resource.
+The **GIL serializes bytecode**, so two opcodes never corrupt a Python object —
+but it **releases** on I/O calls (socket, disk, DB driver) and at every `await`.
+Every Python race is **logical**: a read-decide-write crosses a blocking call or an
+`await`, another thread/task enters the window, the invariant breaks.
+`multiprocessing` has no GIL across processes — that is where shared
+memory/resource is real.
 
 ## The races you will encounter
 
 - **`threading`**: non-atomic read-modify-write (`counter += 1`,
-  `if key not in cache: cache[key] = compute()`). The `+=` is *load → add → store*
-  in separate opcodes; the scheduler switches threads in the middle (every
+  `if key not in cache: cache[key] = compute()`). `+=` is *load → add → store* in
+  separate opcodes; the scheduler switches threads mid-sequence (every
   `sys.setswitchinterval`, ~5ms by default since CPython 3.2, or on I/O).
 - **`asyncio`**: the most treacherous window. Between `x = await read()` and
-  `await write(x)` the event loop runs another task — classic check-then-act. With
-  no await in the middle, nothing interrupts.
+  `await write(x)` the event loop runs another task — classic check-then-act. No
+  await in the middle, no interruption.
 - **`multiprocessing`**: no shared GIL — an in-memory counter is a real race;
   needs `Value`/`Array(lock=True)` or `Manager`.
-- **Logical database/cache/file race**: universal, independent of the GIL. The most
-  common one in Django/FastAPI backends. Cured at the data layer — see
+- **Logical database/cache/file race**: universal, GIL-independent. The most common
+  one in Django/FastAPI backends. Cured at the data layer — see
   `references/databases-sql.md`.
 
 ## How to avoid
@@ -117,14 +117,14 @@ except FileExistsError:
 | `threading.Lock` / `RLock` | Serialize in-memory read-modify-write across threads; minimal scope |
 | `threading.Barrier` | Simultaneous start of N threads (concurrency test) |
 | `queue.Queue` | Pass work between threads without sharing mutable state |
-| `asyncio.Lock` | Close the window of an `await` in the middle of check-then-act (per key) |
-| `asyncio.Semaphore` | Limit concurrency (N tasks on the resource at the same time) |
+| `asyncio.Lock` | Close an `await` window in check-then-act (per key) |
+| `asyncio.Semaphore` | Limit concurrency (N tasks on the resource at once) |
 | `asyncio.gather` | Fire N simultaneous coroutines (test or fan-out) |
 | `multiprocessing.Value/Array(lock=True)` | Counter/buffer shared across processes |
 | `multiprocessing.Manager` | Structures (dict/list) shared with a lock across processes |
 | Django `F()` | Atomic UPDATE of a counter/balance without reading first |
 | Django `select_for_update()` | Pessimistic row lock for logic between read and write |
-| Django `transaction.atomic` | Wrap read+write in one transaction (do not commit in the middle) |
+| Django `transaction.atomic` | Wrap read+write in one transaction (no mid-commit) |
 | SQLAlchemy `with_for_update()` | `SELECT ... FOR UPDATE` in the ORM |
 | `UNIQUE` constraint | Idempotency/uniqueness — the database rejects the duplicate |
 
@@ -150,9 +150,9 @@ with Session(engine) as s, s.begin():
 
 ## Prove the guard
 
-A race does not reproduce sequentially. The test launches **N threads at the same time** with
-`threading.Barrier` and asserts the invariant. Run it against the BAD version to see it
-fail; against the GOOD one to pass.
+A race does not reproduce sequentially. The test launches **N threads at once** with
+`threading.Barrier` and asserts the invariant. Run it against the BAD version to see
+it fail; against the GOOD one to pass.
 
 ```python
 import threading
@@ -198,7 +198,7 @@ def test_concurrent_withdraw_never_negative():
 
 ## Lint & static detection
 
-Python has no ThreadSanitizer; lint catches little of races. The real detector is
+Python has no ThreadSanitizer; lint catches little of races. The real detector is a
 **concurrency test + database guard**. Full catalog in
 `references/lint-detectors.md`. What exists:
 
@@ -210,26 +210,26 @@ ruff check .              # covers part of the flake8-async/bugbear rules (ASYNC
 
 - **Catches**: `time.sleep` or a blocking call inside `async def`, insecure temp
   `open`, some filesystem TOCTOU.
-- **Does NOT catch**: lost update in the database, logical check-then-act, missing
-  `select_for_update`, `get_or_create` without `UNIQUE`. None of this shows up in the linter
-  — only in a concurrent test and review.
+- **Does NOT catch**: database lost update, logical check-then-act, missing
+  `select_for_update`, `get_or_create` without `UNIQUE`. None of it shows in the
+  linter — only in a concurrent test and review.
 
 ## Python-specific anti-patterns
 
 - **"I have the GIL, so it is thread-safe"** — the GIL protects the opcode, not the
-  sequence. `counter += 1` is 3 opcodes; I/O and `await` yield in the middle.
-- **`get_or_create` / `update_or_create` without `UNIQUE`** in the schema — creates a duplicate
-  under a race. The constraint is the guard; the method alone is not.
+  sequence. `counter += 1` is 3 opcodes; I/O and `await` yield mid-sequence.
+- **`get_or_create` / `update_or_create` without `UNIQUE`** in the schema — creates a
+  duplicate under a race. The constraint is the guard; the method alone is not.
 - **`select_for_update()` outside `transaction.atomic`** — Django raises an error;
-  without the transaction the lock does not last. A pessimistic lock is only valid inside the transaction.
-- **Read-decide-write in memory and only then `.save()`** (instead of `F()`) —
-  it is the canonical ORM lost update.
-- **A global `asyncio.Lock` for everything** — serializes the entire service. Use a
+  without the transaction the lock does not last. A pessimistic lock is valid only inside it.
+- **Read-decide-write in memory, then `.save()`** (instead of `F()`) — the canonical
+  ORM lost update.
+- **A global `asyncio.Lock` for everything** — serializes the whole service. Use a
   **per-key** lock (`defaultdict(asyncio.Lock)`) to lock only the account/resource.
 - **`threading.Lock`/`asyncio.Lock` in a service with N workers/replicas**
-  (gunicorn, uvicorn `--workers`) — does not serialize across processes. The guard has
-  to be in the database (`select_for_update`, `UNIQUE`).
-- **`multiprocessing` expecting a shared mutable global** — each process
-  has its own copy; use `Value`/`Array(lock=True)` or `Manager`.
-- **Testing concurrency with a sequential `for`** — it does not open the window. You need
+  (gunicorn, uvicorn `--workers`) — does not serialize across processes. The guard must
+  live in the database (`select_for_update`, `UNIQUE`).
+- **`multiprocessing` expecting a shared mutable global** — each process has its own
+  copy; use `Value`/`Array(lock=True)` or `Manager`.
+- **Testing concurrency with a sequential `for`** — it never opens the window. Use
   `threading.Barrier` or `asyncio.gather` for a simultaneous start.

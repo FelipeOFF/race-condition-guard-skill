@@ -2,29 +2,29 @@
 
 ## Concurrency model
 
-The JVM runs **real OS threads** with shared memory — no GIL nor event
-loop that serializes the CPU. The danger lives in the **Java Memory Model (JMM)**: without a
+The JVM runs **real OS threads** with shared memory — no GIL or event loop
+serializing the CPU. The danger is the **Java Memory Model (JMM)**: without a
 *happens-before* (via `volatile`, `synchronized`, `java.util.concurrent`, `final`),
-a write from one thread may **never become visible** to another, or be
-reordered by the compiler/CPU. Race here combines **memory data race**
-(visibility/atomicity within the process) and **logical race** (check-then-act on the database).
-Kotlin compiles to the same JVM — coroutines do **not** swap out the JMM by magic.
+a write may **never become visible** to another thread, or be reordered by the
+compiler/CPU. Race here spans **memory data race** (visibility/atomicity in-process)
+and **logical race** (check-then-act on the database). Kotlin compiles to the same
+JVM — coroutines do **not** swap out the JMM.
 
 ## The races you will encounter
 
-- **Memory data race** — mutable field without `volatile`/lock: stale value
-  (stale), lost `i++`, corrupted `HashMap` during `resize` (classic infinite loop).
+- **Memory data race** — mutable field without `volatile`/lock: stale value,
+  lost `i++`, corrupted `HashMap` during `resize` (classic infinite loop).
 - **Check-then-act** — `containsKey`-then-`put`, `if (instance == null) new ...`:
   the window between test and action lets two threads act together.
-- **Lazy-init / DCL** without `volatile`: another thread sees the reference published before
-  the constructor finishes (a "half-constructed" object).
+- **Lazy-init / DCL** without `volatile`: another thread sees the reference published
+  before the constructor finishes (a "half-constructed" object).
 - **Compound action on a thread-safe collection** — `ConcurrentHashMap` is safe per
   operation, but `get`-then-`put` is still check-then-act.
-- **Logical race on the database** — lost update / double-submit; the JMM does not help, the guard is
-  transaction/constraint (see `references/databases-sql.md`).
-- **Kotlin coroutines** — `state++` in two `launch` over the same var on the default
-  dispatcher (multi-thread) loses updates; and even when confined, read-decide-write that
-  crosses a `suspend` lets another coroutine enter the window.
+- **Logical race on the database** — lost update / double-submit; the JMM does not help;
+  guard with a transaction/constraint (see `references/databases-sql.md`).
+- **Kotlin coroutines** — `state++` in two `launch` over one var on the default
+  dispatcher (multi-thread) loses updates; even confined, read-decide-write crossing
+  a `suspend` lets another coroutine enter the window.
 
 ## How to avoid
 
@@ -139,7 +139,7 @@ class Account(
 //   em.find(Account::class.java, id, LockModeType.PESSIMISTIC_WRITE)  // = SELECT FOR UPDATE
 ```
 
-Cross-cutting detail of the database layer in `references/databases-sql.md`.
+Database-layer detail in `references/databases-sql.md`.
 
 ## Idiomatic guards
 
@@ -151,18 +151,18 @@ Cross-cutting detail of the database layer in `references/databases-sql.md`.
 | `LongAdder`/`LongAccumulator` | high-contention counter (write-heavy, rarely read) |
 | `ConcurrentHashMap.compute*`/`merge` | atomic read-modify-write per key |
 | `CopyOnWriteArrayList` | list read a lot, rarely written (listeners) |
-| Holder idiom / `Lazy` (Kotlin) | thread-safe lazy initialization without a lock |
+| Holder idiom / `Lazy` (Kotlin) | thread-safe lazy init, no lock |
 | `kotlinx.coroutines.sync.Mutex` | exclusion between coroutines (suspends, does not block) |
-| `@Version` (JPA) / `LockModeType.PESSIMISTIC_WRITE` | lost update on the database (optimistic/pessimistic) |
-| immutable `record` / `data class` + confinement | prefer not sharing mutable state over locking it |
+| `@Version` (JPA) / `LockModeType.PESSIMISTIC_WRITE` | database lost update (optimistic/pessimistic) |
+| immutable `record` / `data class` + confinement | don't share mutable state instead of locking it |
 
-`ReentrantLock` over `synchronized` when you need `tryLock(timeout)`, fairness
-or an interruptible lock — always `lock()` in `try` / `unlock()` in `finally`.
+Pick `ReentrantLock` over `synchronized` for `tryLock(timeout)`, fairness or an
+interruptible lock — always `lock()` in `try`, `unlock()` in `finally`.
 
 ## Prove the guard
 
-Simultaneous start: an `ExecutorService` fires N threads, a `CountDownLatch` holds them
-to start together (maximizes the window), and the test asserts the invariant at the end.
+Simultaneous start: `ExecutorService` fires N threads, a `CountDownLatch` releases
+them together (maximizes the window), then the test asserts the invariant.
 
 ```java
 @Test
@@ -192,9 +192,9 @@ void counter_under_concurrency_loses_no_increment() throws Exception {
 }
 ```
 
-Run under stress (repeat, increase N) — a single pass may not open the window. To
-prove the JMM at the limit (reordering, visibility) use **jcstress** (OpenJDK), which
-generates interleavings and classifies the results as `ACCEPTABLE`/`FORBIDDEN`.
+Run under stress (repeat, raise N) — a single pass may not open the window. To prove
+the JMM at the limit (reordering, visibility) use **jcstress** (OpenJDK): it generates
+interleavings and classifies results as `ACCEPTABLE`/`FORBIDDEN`.
 
 ## Lint & static detection
 
@@ -210,26 +210,26 @@ infer run -- ./gradlew build
 ```
 
 - **SpotBugs `MT_CORRECTNESS`** catches inconsistent `synchronized`, non-synchronized
-  static-field lazy-init, `wait()` outside a loop. Does not catch database races.
-- **Error Prone `@GuardedBy`** proves at compile time that every access to the field uses the
+  static-field lazy-init, `wait()` outside a loop. Misses database races.
+- **Error Prone `@GuardedBy`** proves at compile time that every field access holds the
   declared lock — cheap and precise, but only within the method/class.
-- **Infer/RacerD** is the strongest for inter-procedural races; moderate noise.
-- **None** catch lost update on the database nor cover coroutines well — that is concurrency
-  testing + a guard at the data layer + Mutex/confinement by construction.
+- **Infer/RacerD** is strongest for inter-procedural races; moderate noise.
+- **None** catch database lost update nor cover coroutines well — that needs concurrency
+  testing + a data-layer guard + Mutex/confinement by construction.
 
 ## Java / Kotlin-specific anti-patterns
 
-- **`volatile` ≠ atomic**: using `volatile long count` and doing `count++` expecting
-  atomicity. `volatile` only gives visibility; `++` keeps losing updates.
+- **`volatile` ≠ atomic**: `volatile long count` with `count++` expecting atomicity.
+  `volatile` only gives visibility; `++` keeps losing updates.
 - **DCL without `volatile`** on the instance field: unsafe publication; use the Holder
   idiom (static) or `volatile` (instance) — never DCL without a barrier.
 - **`Collections.synchronizedMap` + iteration** without externally synchronizing the loop,
-  or thinking `ConcurrentHashMap` makes `get`+`put` atomic (it does not).
+  or assuming `ConcurrentHashMap` makes `get`+`put` atomic (it does not).
 - **`GlobalScope.launch`** without structured concurrency: the coroutine leaks, writes
-  after the scope dies and exceptions vanish. Use `coroutineScope`/`supervisorScope`.
+  after the scope dies, exceptions vanish. Use `coroutineScope`/`supervisorScope`.
 - **`@Transactional` on a `private`/self-invoked method** (Spring): the proxy does not
-  intercept, the transaction does not open, and the "pessimistic lock" runs outside a transaction.
-- **Swallowed `OptimisticLockException`**: it must become a retry or an explicit error,
+  intercept, no transaction opens, and the "pessimistic lock" runs outside it.
+- **Swallowed `OptimisticLockException`**: must become a retry or an explicit error,
   never an empty `catch` (silent corruption, see `databases-sql.md`).
 - **`@Async`/`@Scheduled` mutating a singleton bean field** without a guard: the bean is
   shared across all requests/threads.

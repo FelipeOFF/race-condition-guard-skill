@@ -3,26 +3,25 @@
 ## Concurrency model
 
 Node and the browser run JavaScript on a **single-thread event loop**: two
-synchronous stretches never execute at the same time, so there is **no memory
-data race** in ordinary code. The danger is the **logical race**: every `await`
-(or I/O callback) is a *yield* point where another task steps in. If you read a
-value, `await`, and write based on what you read, the TOCTOU window opened —
-another request ran in the middle. The real exception is `worker_threads` +
-`SharedArrayBuffer`: there you have genuine shared memory and a **hardware data
-race**, only tamed with `Atomics`.
+synchronous stretches never run at once, so ordinary code has **no memory data
+race**. The danger is the **logical race**: every `await` (or I/O callback) is a
+*yield* point where another task steps in. Read a value, `await`, then write based
+on that read, and you opened a TOCTOU window — another request ran in between. The
+exception is `worker_threads` + `SharedArrayBuffer`: genuine shared memory and a
+**hardware data race**, tamed only with `Atomics`.
 
 ## The races you'll run into
 
 - **Read-modify-write crossing an `await`** — `x = await load(); x.n++; await save(x)`.
   Two executions read the same `x`, both increment, one write is lost
-  (lost update). This is the case ESLint's `require-atomic-updates` tries to catch.
-- **Double-submit** — the user clicks twice, or the client resends the POST; two
+  (lost update). The case ESLint's `require-atomic-updates` targets.
+- **Double-submit** — user clicks twice, or the client resends the POST; two
   handlers create two records / charge twice. A race between **requests**.
 - **Concurrent cache / lazy-init** — N requests see the empty cache before the
-  first one fills it, and they all fire the same expensive fetch (cache stampede).
+  first fills it, all firing the same expensive fetch (cache stampede).
 - **Real data race in `SharedArrayBuffer`** — a counter shared across
   `worker_threads` without `Atomics`: the non-atomic increment loses writes on the
-  hardware, just like C. Only here is the problem about memory, not logic.
+  hardware, just like C. Only here is the problem memory, not logic.
 - **Persisted state** — any of the above touching the database needs the guard
   **in the database**; an in-memory lock of 1 process is worthless for N replicas.
 
@@ -122,7 +121,7 @@ Atomics.add(view, 0, 1); // indivisible across workers; only here is Atomics nec
 |---|---|
 | Atomic ORM update (`{ increment }`, `updateMany` + conditional `where`) | Persisted counter/balance/stock — closes the window in the database (1st choice) |
 | `UNIQUE` in the schema + handle conflict error | Double-submit, idempotency, unique slug — see `references/databases-sql.md` |
-| `$transaction` (Prisma) / `BEGIN…FOR UPDATE` | Check-then-act that doesn't fit in 1 UPDATE — pessimistic row lock |
+| `$transaction` (Prisma) / `BEGIN…FOR UPDATE` | Check-then-act too big for 1 UPDATE — pessimistic row lock |
 | `Mutex` / `Semaphore` (`async-mutex`) | Serialize a critical section **within 1 process** (cache init, local queue) |
 | Serial queue (`p-queue` concurrency: 1) | Order work by key in a single process/worker |
 | `disabled`/synchronous flag + `finally` | Double-submit on the front end (UX defense, not server) |
@@ -130,13 +129,13 @@ Atomics.add(view, 0, 1); // indivisible across workers; only here is Atomics nec
 | Redis `SET NX PX` + fencing token | Distributed lock across replicas — see `references/databases-sql.md` |
 
 Rule: for **persisted state**, the definitive guard is always in the database. An
-in-memory `Mutex` only serializes within one process — with N replicas/instances
-it serializes nothing. Use the in-memory lock for a local resource; the database
+in-memory `Mutex` serializes within one process only — with N replicas it
+serializes nothing. Use the in-memory lock for a local resource; the database
 for the rest.
 
 ## Proving the guard
 
-A race doesn't reproduce in a sequential call. Fire N simultaneous operations with
+A race won't reproduce sequentially. Fire N simultaneous operations with
 `Promise.all` over the **same** resource and assert the invariant (Vitest/Jest).
 
 ```ts
@@ -177,7 +176,7 @@ a joint start.
 
 TypeScript does **not** detect races (the type system doesn't model time). The
 ecosystem's lint is weak for concurrency — rely on **concurrent test + database
-guard**. What actually exists:
+guard**. What exists:
 
 ```jsonc
 // eslint.config / .eslintrc — relevant ESLint core rules
@@ -190,29 +189,29 @@ guard**. What actually exists:
 ```
 
 - **`require-atomic-updates`** catches the `x = await ...; x = ... x ...` pattern on
-  the same variable/property — the classic intra-function lost update case. It has
-  false negatives: it doesn't see a race **between** functions nor at the database layer.
-- **`no-await-in-loop`** is not a race rule, but it flags loops where you should
+  the same variable/property — the classic intra-function lost update. False
+  negatives: it misses a race **between** functions and at the database layer.
+- **`no-await-in-loop`** is not a race rule, but flags loops where you should
   probably use `Promise.all` — and where serial read-modify-write lives.
 - There is no ThreadSanitizer for JS; a data race in `SharedArrayBuffer` is **not**
-  caught by a linter. The defense is to use `Atomics` by construction.
+  caught by a linter. The defense is using `Atomics` by construction.
 
 Cross-cutting catalog in `references/lint-detectors.md`. A green linter doesn't
-clear review: a logical database race only shows up in the concurrent test and by eye.
+clear review: a logical database race shows up only in the concurrent test and by eye.
 
 ## JavaScript / TypeScript-specific anti-patterns
 
 - **"Single-thread, therefore safe"** — the event loop only protects the CPU; each
   `await` is an entry point for another request. The logical race is alive.
 - **In-memory `Mutex` in a service with N replicas** — doesn't serialize across
-  processes/instances. For shared state, the guard is in the database or in a
+  processes/instances. For shared state, the guard is in the database or a
   distributed lock (Redis with fencing).
 - **App-level `findOrCreate` / `upsert` without `UNIQUE` underneath** — has a TOCTOU
   window; creates a duplicate under a race. Ensure the constraint in the schema.
 - **`Promise.all` without a limit over a contended resource** — fires 10k
-  simultaneous writes and blows the pool/connection; use `p-limit`/`p-queue` to throttle.
-- **`forEach` with an `async` callback** — doesn't wait for the promises; the
-  function "finishes" before the writes, hiding the window. Use `for…of` + `await` or `Promise.all`.
+  simultaneous writes and blows the pool/connection; throttle with `p-limit`/`p-queue`.
+- **`forEach` with an `async` callback** — doesn't await the promises; the function
+  "finishes" before the writes, hiding the window. Use `for…of` + `await` or `Promise.all`.
 - **Swallowing a `UNIQUE`/conflict error without picking a winner** — a silent
   `catch {}` turns the race into silent corruption; treat it as "lost, return the 1st".
 - **Forgotten `Atomics`** — any read-modify-write on `SharedArrayBuffer` without

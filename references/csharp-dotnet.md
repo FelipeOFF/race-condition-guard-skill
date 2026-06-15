@@ -2,13 +2,13 @@
 
 ## Concurrency model
 
-.NET has **real threads** with shared memory (`ThreadPool`, TPL) and
-`async`/`await` that multiplexes tasks over those threads. The race arises in two
-places: **memory data race** (two threads touch the same field without
-synchronization — torn read of `long`/`decimal`, non-atomic `++`, non
-thread-safe list) and **logical race** (an `await` or a `SELECT`→`UPDATE` in the middle of a
-check-then-act opens the window for another task/request). The JIT and the CPU still
-reorder accesses without a barrier, so "looks sequential" is no guarantee.
+.NET has **real threads** with shared memory (`ThreadPool`, TPL) plus
+`async`/`await` multiplexing tasks over them. Races arise in two places:
+**memory data race** (two threads touch a field without synchronization — torn
+read of `long`/`decimal`, non-atomic `++`, non-thread-safe list) and **logical
+race** (an `await` or `SELECT`→`UPDATE` mid check-then-act opens a window for
+another task/request). The JIT and CPU reorder accesses without a barrier, so
+"looks sequential" guarantees nothing.
 
 ## The races you will encounter
 
@@ -18,11 +18,11 @@ reorder accesses without a barrier, so "looks sequential" is no guarantee.
 - **Check-then-act in memory**: `if (!cache.ContainsKey(k)) cache[k] = ...` —
   two threads pass the `if` and both write/initialize.
 - **Logical race over I/O**: handler reads balance (`await`), decides, writes (`await`)
-  — two requests enter the window between the two `await`s.
+  — two requests enter the window between the `await`s.
 - **Deadlock from synchronous blocking in async**: `.Result`/`.Wait()`/`.GetAwaiter().GetResult()`
-  in a context with a `SynchronizationContext` (UI, classic ASP.NET) locks up for good.
-- **Lost update in the database**: EF Core reads entity, changes it, `SaveChanges` — without a concurrency
-  token, the last write wins silently.
+  in a context with a `SynchronizationContext` (UI, classic ASP.NET) locks up permanently.
+- **Lost update in the database**: EF Core reads entity, changes it, `SaveChanges` — without a
+  concurrency token, last write wins silently.
 
 ## How to avoid
 
@@ -108,16 +108,16 @@ public async Task DoAsync()
 
 | Primitive | When to use |
 |---|---|
-| `Interlocked.Increment/Add/Exchange/CompareExchange` | atomic counter/flag/swap of `int`/`long`, without a lock |
-| `Volatile.Read/Write`, `volatile` | publish a flag between threads without reordering (does not give composite atomicity) |
+| `Interlocked.Increment/Add/Exchange/CompareExchange` | atomic counter/flag/swap of `int`/`long`, lock-free |
+| `Volatile.Read/Write`, `volatile` | publish a flag between threads without reordering (no composite atomicity) |
 | `lock` (Monitor) | **synchronous** critical section with composite logic; minimal scope, dedicated object |
 | `SemaphoreSlim` (+ `WaitAsync`) | exclusion/concurrency limit in **async** code |
 | `ConcurrentDictionary` (`GetOrAdd`/`AddOrUpdate`) | shared map get-or-create / per-key counter |
 | `ConcurrentQueue/Bag`, `Channel<T>` | producer-consumer without a manual lock |
 | `Lazy<T>` (default thread-safe mode) | single, expensive initialization under a race |
 | `ReaderWriterLockSlim` | many reads, few writes (expensive; only if you measure a gain) |
-| `[Timestamp]` rowversion / `[ConcurrencyCheck]` (EF Core) | lost update in the database → `DbUpdateConcurrencyException` + retry |
-| `SELECT ... FOR UPDATE` via `FromSqlRaw` / transaction | pessimistic lock when the logic does not fit in an UPDATE — see `references/databases-sql.md` |
+| `[Timestamp]` rowversion / `[ConcurrencyCheck]` (EF Core) | DB lost update → `DbUpdateConcurrencyException` + retry |
+| `SELECT ... FOR UPDATE` via `FromSqlRaw` / transaction | pessimistic lock when logic does not fit in an UPDATE — see `references/databases-sql.md` |
 
 ### EF Core: optimistic lock with retry
 
@@ -136,14 +136,14 @@ for (var attempt = 0; ; attempt++)
 }
 ```
 
-Cross-cutting detail of isolation level, `FOR UPDATE`, constraints and write skew:
-**see `references/databases-sql.md`**. The database guard holds for all replicas;
-`lock`/`Interlocked` only serialize **within a single process**.
+Isolation level, `FOR UPDATE`, constraints and write skew are cross-cutting:
+**see `references/databases-sql.md`**. The database guard holds across all
+replicas; `lock`/`Interlocked` only serialize **within a single process**.
 
 ## Prove the guard
 
-xUnit test that fires N simultaneous tasks with a `Barrier` (synchronized start) and
-asserts the invariant. The BAD version (`_count++`) fails here; the GOOD one always passes.
+xUnit test firing N simultaneous tasks with a `Barrier` (synchronized start),
+asserting the invariant. The BAD version (`_count++`) fails; the GOOD one always passes.
 
 ```csharp
 using System.Linq;
@@ -173,7 +173,7 @@ public class CounterRaceTests
 ```
 
 Run with `dotnet test`. Under `_count++` the assert breaks non-deterministically
-— run it a few times or increase `threads` if it does not reproduce on the first pass.
+— rerun a few times or raise `threads` if it does not reproduce on the first pass.
 
 ## Lint & static detection
 
@@ -190,20 +190,20 @@ Run with `dotnet test`. Under `_count++` the assert breaks non-deterministically
 Catches (rules `VSTHRD*`): `VSTHRD002` use of `.Result`/`.Wait()`/`.GetAwaiter().GetResult()`
 (sync-over-async deadlock), `VSTHRD103` synchronous call when an async version exists,
 `VSTHRD111`/`VSTHRD200` missing `ConfigureAwait`/`Async` convention, `VSTHRD110`
-unawaited `Task` (silent fire-and-forget). With `dotnet build` (Roslyn) the
+unawaited `Task` (silent fire-and-forget). Under `dotnet build` (Roslyn) the
 analyzers run in CI; `TreatWarningsAsErrors` turns the warning into a failure.
 
 **Does not catch**: logical data race between two `await`s (check-then-act over I/O),
-lost update in the database, or forgetting `Interlocked` on a `++`. .NET **has no
-ThreadSanitizer** — the real detector for these cases is the **concurrency test +
+DB lost update, or a missing `Interlocked` on a `++`. .NET **has no
+ThreadSanitizer** — the real detector for these is the **concurrency test +
 database guard**. Full catalog in `references/lint-detectors.md`.
 
 ## C# / .NET-specific anti-patterns
 
 - `lock (this)` or `lock ("string literal")` — the object is visible/interned by the
-  runtime; external code can lock on the same monitor → deadlock. Use a private `object`.
+  runtime; external code can lock the same monitor → deadlock. Use a private `object`.
 - `lock` around an `await` — compile error (CS1996); use `SemaphoreSlim`.
-- `.Result`/`.Wait()` "just in this case" — in classic ASP.NET/UI it is a guaranteed deadlock
+- `.Result`/`.Wait()` "just this once" — in classic ASP.NET/UI it is a guaranteed deadlock
   under load; `async` all the way up is the only cure.
 - `async void` (outside an event handler) — the exception is not catchable, the task not awaitable;
   use `async Task`.

@@ -1,10 +1,9 @@
 # Race conditions at the database layer (universal)
 
-Applies to **every** language: no matter how much the runtime serializes CPU (GIL, event
-loop) or how many N replicas you run, the database is the shared point of truth.
-Most backend races are resolved **here** — and resolved well, because the database already
-has atomic primitives. This is the cross-cutting reference cited by all the
-others.
+Applies to **every** language: regardless of how the runtime serializes CPU (GIL, event
+loop) or how many N replicas you run, the database is the shared source of truth.
+Most backend races are resolved **here**, and resolved well, because the database has
+atomic primitives. This is the cross-cutting reference cited by all the others.
 
 ## Why the database is the right place for the guard
 
@@ -19,16 +18,16 @@ others.
 |---|---|---|---|
 | READ COMMITTED (default PG/Oracle) | dirty read | non-repeatable read, lost update, phantom | most cases; **needs** atomic UPDATE/explicit lock |
 | REPEATABLE READ (default MySQL InnoDB) | + non-repeatable read | phantom (PG: no), write skew | consistent read |
-| SERIALIZABLE | everything (write skew included) | nothing — may abort with serialization error | multi-row invariant; **handle the retry** |
+| SERIALIZABLE | everything (incl. write skew) | nothing — may abort with serialization error | multi-row invariant; **handle the retry** |
 
-Rule of thumb: in READ COMMITTED, **check-then-act is not safe by default** —
-you need `FOR UPDATE`, a conditional UPDATE, or a constraint. SERIALIZABLE
-resolves write skew (e.g., "at most 2 doctors on call") but requires a **retry on the
-serialization error** (`40001` / deadlock).
+Rule of thumb: in READ COMMITTED, **check-then-act is not safe by default** — you need
+`FOR UPDATE`, a conditional UPDATE, or a constraint. SERIALIZABLE resolves write skew
+(e.g., "at most 2 doctors on call") but requires a **retry on the serialization error**
+(`40001` / deadlock).
 
 ## Pattern 1 — Conditional atomic UPDATE (lost update)
 
-The window closes in the database: nothing is read beforehand in the app.
+The window closes in the database; nothing is read beforehand in the app.
 
 ```sql
 -- BAD: app reads, decides, writes (lost update under concurrency)
@@ -43,7 +42,7 @@ UPDATE accounts
 -- affected rows == 0  → insufficient balance OR lost the race → explicit error
 ```
 
-Always **check the affected rows**. 0 rows is the "lost" signal.
+Always **check the affected rows**: 0 rows is the "lost" signal.
 
 ## Pattern 2 — Uniqueness constraint (check-then-act / double-submit)
 
@@ -62,11 +61,11 @@ INSERT INTO operations (idempotency_key, ...) VALUES (:key, ...);
 ```
 
 `EXCLUDE` (Postgres) enforces uniqueness by overlap (e.g., room reservations without
-time clash) — `EXCLUDE USING gist (room WITH =, period WITH &&)`.
+time clash): `EXCLUDE USING gist (room WITH =, period WITH &&)`.
 
 ## Pattern 3 — Pessimistic lock (`SELECT ... FOR UPDATE`)
 
-When you need **logic between read and write** that doesn't fit in an UPDATE.
+When you need **logic between read and write** that won't fit in an UPDATE.
 
 ```sql
 BEGIN;
@@ -107,13 +106,11 @@ INSERT INTO counters (key, n) VALUES (:k, 1)
 ON DUPLICATE KEY UPDATE n = n + 1;
 ```
 
-Replaces the app's `get_or_create` (which has a TOCTOU window) with a single
-atomic operation.
+Replaces the app's `get_or_create` (which has a TOCTOU window) with one atomic operation.
 
 ## Pattern 6 — Advisory lock (serialize by logical key)
 
-When what you want to serialize is not a row (e.g., "only one closing job
-per day").
+When what you want to serialize is not a row (e.g., "only one closing job per day").
 
 ```sql
 -- Postgres: lock by key, released at the end of the transaction
@@ -124,10 +121,9 @@ COMMIT;  -- releases
 
 ## Distributed lock (Redis) — when there is no transactional database in the path
 
-Use `SET key token NX PX <ttl>` to acquire and a **fencing token** to prevent
-an expired lock and a new owner from writing out of order. Caution: a distributed
-lock is more fragile than the database — prefer the guard in the database when the
-state already lives there.
+Use `SET key token NX PX <ttl>` to acquire and a **fencing token** to stop an expired
+lock and a new owner from writing out of order. Caution: a distributed lock is more
+fragile than the database — prefer the database guard when the state already lives there.
 
 ```
 ok = SET lock:res <token> NX PX 30000      # acquire only if free, with TTL
@@ -139,7 +135,7 @@ ok = SET lock:res <token> NX PX 30000      # acquire only if free, with TTL
 
 - **READ COMMITTED + check-then-act** without `FOR UPDATE`/atomic UPDATE = lost update.
 - **Write skew** (two sides read, each decides, together they break the invariant)
-  only disappears in SERIALIZABLE — and requires handling the serialization error with retry.
+  only disappears in SERIALIZABLE, and requires handling the serialization error with retry.
 - **`get_or_create` without `UNIQUE`** underneath creates a duplicate under a race.
 - **Long transaction** holding a heavy lock kills throughput and causes deadlock.
 - **Commit in the middle** of the check→act window reopens the race.

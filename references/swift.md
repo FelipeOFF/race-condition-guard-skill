@@ -2,29 +2,28 @@
 
 ## Concurrency model
 
-Swift has real threads (GCD/`Thread`), so **memory data races exist for
-real**: two tasks touching the same shared mutable `class` corrupt
-state. Modern concurrency closes this by construction — `actor` isolates mutable
-state behind an implicit serial queue, `Sendable` marks what crosses
-boundaries safely, and `@MainActor` pins UI to the main thread. The danger lives
-in reference types (`class`) without protection, mutable captures in concurrent
-closures, and legacy GCD/`NSLock`. In **Swift 6 language mode** with
-`-strict-concurrency=complete`, most of these data races become **compile
-errors** — the language's differentiator.
+Swift has real threads (GCD/`Thread`), so **memory data races are real**: two
+tasks touching the same shared mutable `class` corrupt state. Modern concurrency
+closes this by construction — `actor` isolates mutable state behind an implicit
+serial queue, `Sendable` marks what crosses boundaries safely, `@MainActor` pins
+UI to the main thread. The danger lives in unprotected reference types (`class`),
+mutable captures in concurrent closures, and legacy GCD/`NSLock`. In **Swift 6
+language mode** with `-strict-concurrency=complete`, most of these data races
+become **compile errors** — the language's differentiator.
 
 ## The races you'll encounter
 
-- **Memory data race** — mutable `class` shared between tasks (counter,
-  cache, array). Unsynchronized access = undefined behavior, not just
-  "wrong value". It's what `actor`, lock, or `-strict-concurrency` kill.
-- **Logical race on isolated state** — even with everything `Sendable`, `read → decide →
-  write` crossing an `await` lets another task enter the window (actor
+- **Memory data race** — mutable `class` shared between tasks (counter, cache,
+  array). Unsynchronized access is undefined behavior, not just a "wrong value".
+  It's what `actor`, lock, or `-strict-concurrency` kill.
+- **Logical race on isolated state** — even with everything `Sendable`, a `read →
+  decide → write` crossing an `await` lets another task enter the window (actor
   reentrancy is the classic case).
 - **Off-main UI** — mutating `UIView`/`@Published` off the main thread: crash or
   glitch. `@MainActor` solves it.
-- **Persistence race** — check-then-act in Core Data/SQLite/remote database:
-  two concurrent `save`s, lost update. Lives in the data layer, not on the CPU
-  (see `references/databases-sql.md`).
+- **Persistence race** — check-then-act in Core Data/SQLite/remote database: two
+  concurrent `save`s, lost update. Lives in the data layer, not on the CPU (see
+  `references/databases-sql.md`).
 
 ## How to avoid it
 
@@ -146,11 +145,11 @@ let results = try await withThrowingTaskGroup(of: Data.self) { group in
 
 | Primitive | When to use |
 |---|---|
-| `actor` | Mutable state shared between tasks; protects by isolation, not by manual lock |
-| `@MainActor` | Anything touching UIKit/SwiftUI/AppKit; forces execution on the main thread at compile time |
+| `actor` | Mutable state shared between tasks; protects by isolation, not manual lock |
+| `@MainActor` | Anything touching UIKit/SwiftUI/AppKit; forces main-thread execution at compile time |
 | `Sendable` / `@Sendable` | Mark types/closures safe to cross concurrency boundaries |
 | `async let` / `TaskGroup` | Structured parallelism without sharing mutable state |
-| `nonisolated` | Actor members that don't touch mutable state (avoids unnecessary `await`) |
+| `nonisolated` | Actor members not touching mutable state (avoids unnecessary `await`) |
 | `Atomic<T>` (`Synchronization` module) | Low-level lock-free counter/flag; stdlib in Swift 6, or `ManagedAtomic<T>` from the `swift-atomics` package for back-deploy — without yielding to the actor |
 | `OSAllocatedUnfairLock` | Modern, lightweight, `Sendable` lock (replaces raw `os_unfair_lock`) |
 | `NSLock` / serial `DispatchQueue` | Legacy GCD; still valid in pre-async code, minimal scope |
@@ -158,9 +157,9 @@ let results = try await withThrowingTaskGroup(of: Data.self) { group in
 
 ## Proving the guard
 
-Real test in XCTest: launch N simultaneous tasks against the **same** actor and
-assert the invariant. Without `actor`, this test detects the data race (under TSan) or the
-wrong count; with it, it always passes.
+Real XCTest: launch N simultaneous tasks against the **same** actor and assert
+the invariant. Without `actor`, this test detects the data race (under TSan) or
+the wrong count; with it, it always passes.
 
 ```swift
 import XCTest
@@ -179,10 +178,10 @@ final class CounterRaceTests: XCTestCase {
 }
 ```
 
-For legacy synchronous code (no async), `DispatchQueue.concurrentPerform`
-blocks until all iterations finish — launch N operations on the same object
-and assert afterward. Here `legacy` is the **unsynchronized** `class` (the BAD from section
-1), not the `actor`: it's precisely the one that should fail under TSan or lose count.
+For legacy synchronous code (no async), `DispatchQueue.concurrentPerform` blocks
+until all iterations finish — launch N operations on the same object and assert
+afterward. Here `legacy` is the **unsynchronized** `class` (the BAD from section
+1), not the `actor`: precisely the one that should fail under TSan or lose count.
 
 ```swift
 let legacy = Counter()   // the mutable class from the BAD block, without protection
@@ -190,9 +189,9 @@ DispatchQueue.concurrentPerform(iterations: 10_000) { _ in legacy.increment() }
 XCTAssertEqual(legacy.count, 10_000)   // may fail: increment() is not atomic
 ```
 
-Run the suite with the **Thread Sanitizer enabled** (Scheme → Diagnostics → Thread
-Sanitizer): it instruments the accesses and fails on the first real data race,
-even if the count happens to match.
+Run the suite with the **Thread Sanitizer enabled** (Scheme → Diagnostics →
+Thread Sanitizer): it instruments the accesses and fails on the first real data
+race, even if the count happens to match.
 
 ## Lint & static detection
 
@@ -202,31 +201,32 @@ even if the count happens to match.
   -strict-concurrency=complete`, or in `Package.swift` per target
   `.enableExperimentalFeature("StrictConcurrency")` (pre-Swift 6) /
   `swiftLanguageMode(.v6)`. Catches: non-`Sendable` mutable state crossing a
-  boundary, unsafe capture in `@Sendable`, access to `@MainActor` off the main thread.
-  **Doesn't catch**: logical race in persistence, nor `@unchecked Sendable` (you
-  take on the risk).
+  boundary, unsafe capture in `@Sendable`, access to `@MainActor` off the main
+  thread. **Doesn't catch**: logical race in persistence, nor `@unchecked
+  Sendable` (you take on the risk).
 
 - **Thread Sanitizer (Xcode/SwiftPM).** Dynamic detector, same engine as Go's
-  `-race`. Covers legacy code, `@unchecked Sendable`, and GCD that the
-  compiler doesn't prove. `swift test --sanitize=thread` or Scheme → Diagnostics →
-  Thread Sanitizer. **Doesn't catch** what doesn't run — it needs a test that
-  exercises the concurrent path.
+  `-race`. Covers legacy code, `@unchecked Sendable`, and GCD the compiler
+  doesn't prove. `swift test --sanitize=thread` or Scheme → Diagnostics → Thread
+  Sanitizer. **Doesn't catch** what doesn't run — it needs a test exercising the
+  concurrent path.
 
-Cross-cutting detail of both tools in `references/lint-detectors.md`.
-Neither one catches a **logical** race in the data layer — only a concurrent test
-and review do.
+Cross-cutting detail of both tools in `references/lint-detectors.md`. Neither
+catches a **logical** race in the data layer — only a concurrent test and review
+do.
 
 ## Swift-specific anti-patterns
 
-- **`@unchecked Sendable` to "shut up the compiler".** It promises safety that doesn't
-  exist; only with a proven internal lock, never to make the build pass.
-- **Relying on actor reentrancy.** `await` in the middle of the critical section releases
-  the isolation — it's not a mutex that holds until the end. Mutate the state before suspending.
-- **`DispatchQueue.main.sync` on the main thread.** Immediate deadlock. Use `async`
-  or `MainActor.run`.
+- **`@unchecked Sendable` to "shut up the compiler".** Promises safety that
+  doesn't exist; use only with a proven internal lock, never to make the build pass.
+- **Relying on actor reentrancy.** `await` mid critical section releases the
+  isolation — it's not a mutex that holds until the end. Mutate state before suspending.
+- **`DispatchQueue.main.sync` on the main thread.** Immediate deadlock. Use
+  `async` or `MainActor.run`.
 - **`.sync` on a concurrent queue expecting a write barrier.** A barrier is
   `.async(flags: .barrier)`; plain `.sync` doesn't serialize writes.
-- **Lock only in the app (NSLock/actor) in a multi-device system.** It doesn't serialize between
-  instances — the real guard is in the database (`references/databases-sql.md`).
-- **Capturing mutable `self` (class) across multiple `Task`s without isolation.** Classic data
-  race — promote the type to `actor` or `@MainActor`.
+- **Lock only in the app (NSLock/actor) in a multi-device system.** It doesn't
+  serialize between instances — the real guard is in the database
+  (`references/databases-sql.md`).
+- **Capturing mutable `self` (class) across multiple `Task`s without isolation.**
+  Classic data race — promote the type to `actor` or `@MainActor`.

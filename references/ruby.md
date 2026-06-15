@@ -2,28 +2,27 @@
 
 ## Concurrency model
 
-In MRI (CRuby) there is the **GVL** (Global VM Lock): only one thread executes
-Ruby bytecode at a time, but the GVL is **released on I/O** (database query, HTTP,
-file read). That does not save you: a read-modify-write that crosses an I/O call
-that releases the GVL — or that is not a single atomic bytecode operation —
-lets another thread enter the window. In **JRuby** and **TruffleRuby** there is no
-GVL: threads run in real parallel and any shared mutable state is a true data
-race. The danger
-lives in web servers with a thread pool (Puma, Sidekiq) and in any `@@var`,
-mutable constant, or singleton shared between requests.
+In MRI (CRuby) the **GVL** (Global VM Lock) runs one thread of Ruby bytecode at
+a time, but **releases on I/O** (database query, HTTP, file read). That does not
+save you: a read-modify-write crossing an I/O call that releases the GVL — or
+that is not a single atomic bytecode op — lets another thread into the window.
+In **JRuby** and **TruffleRuby** there is no GVL: threads run truly parallel and
+any shared mutable state is a real data race. The danger lives in web servers
+with a thread pool (Puma, Sidekiq) and in any `@@var`, mutable constant, or
+singleton shared between requests.
 
 ## The races you will encounter
 
 - **Memory data race** — `@@counter += 1`, a `Hash`/`Array` shared between
   threads, lazy memoization in a singleton (`@config ||= load`). On MRI it gives
-  the wrong result; on JRuby/TruffleRuby it can even corrupt the structure.
-- **Logical / database race** — the bread and butter in Rails: `find_or_create_by`
-  creates a duplicate, check-then-act on balance/stock causes a lost update,
-  form double-submit creates two records. The GVL covers none of this — the race
-  is between Puma processes and replicas, in the database.
+  the wrong result; on JRuby/TruffleRuby it can corrupt the structure.
+- **Logical / database race** — the staple in Rails: `find_or_create_by` creates
+  a duplicate, check-then-act on balance/stock causes a lost update, form
+  double-submit creates two records. The GVL covers none of this — the race is
+  between Puma processes and replicas, in the database.
 - **Lost update from a stale object** — two requests load the same `ActiveRecord`,
-  both mutate different attributes and save: the second `save` overwrites the
-  first entirely (not just the field that changed).
+  mutate different attributes and save: the second `save` overwrites the first
+  entirely (not just the changed field).
 
 ## How to avoid
 
@@ -107,27 +106,27 @@ end
 
 | Primitive | When to use |
 |---|---|
-| `Mutex#synchronize` | serialize access to in-memory mutable state within the process (does not cover N replicas) |
+| `Mutex#synchronize` | serialize in-memory mutable state within the process (does not cover N replicas) |
 | `Concurrent::AtomicFixnum` | numeric counter/flag shared between threads — atomic increment |
 | `Concurrent::Map` | shared thread-safe dictionary (replaces a bare `Hash` under threads) |
-| `Concurrent::AtomicReference` | swap an entire reference atomically (compare-and-set) |
+| `Concurrent::AtomicReference` | swap a whole reference atomically (compare-and-set) |
 | unique index + `rescue ActiveRecord::RecordNotUnique` | get-or-create / double-submit / idempotency key |
 | `record.with_lock { ... }` | pessimistic lock (`SELECT FOR UPDATE`) for multi-step check-then-act |
 | optimistic locking (`lock_version`) | low contention; catches concurrent write via `StaleObjectError` |
 | `update_all` / `increment!` / `update_counters` | atomic conditional UPDATE without loading the object |
 | `with_advisory_lock` (gem) | serialize by logical key across processes (`pg_advisory_xact_lock`) |
 
-**Rails native optimistic locking**: add a `lock_version` column
-(integer, default 0). ActiveRecord then starts appending `AND lock_version = :v` to
-every UPDATE and raises `ActiveRecord::StaleObjectError` when 0 rows are
-affected (someone wrote first). Handle it with reload + retry. Cross-cutting detail
-of the version pattern in `references/databases-sql.md` (Pattern 4).
+**Rails native optimistic locking**: add a `lock_version` column (integer,
+default 0). ActiveRecord then appends `AND lock_version = :v` to every UPDATE and
+raises `ActiveRecord::StaleObjectError` on 0 rows affected (someone wrote first).
+Handle it with reload + retry. Version-pattern detail in
+`references/databases-sql.md` (Pattern 4).
 
 ## Prove the guard
 
-A test that fires N threads with a simultaneous start (manual barrier) and asserts the
-invariant. Runnable with RSpec or Minitest — here RSpec. Use a real database
-(in-memory SQLite has no real concurrency; run against Postgres/MySQL).
+A test that fires N threads with a simultaneous start (manual barrier) and
+asserts the invariant. Runs on RSpec or Minitest — here RSpec. Use a real
+database (in-memory SQLite has no real concurrency; run against Postgres/MySQL).
 
 ```ruby
 # spec/models/account_concurrency_spec.rb
@@ -160,13 +159,13 @@ RSpec.describe "Concurrent Account debit", type: :model do
 end
 ```
 
-Without the guard (`account.balance -= 10; account.save!`) the balance ends up negative or
-above zero non-deterministically. Run the spec several times — one pass
-may not open the window.
+Without the guard (`account.balance -= 10; account.save!`) the balance ends
+negative or above zero non-deterministically. Run the spec several times — a
+single pass may not open the window.
 
 ## Lint & static detection
 
-Ruby has no ThreadSanitizer; the real static detection of antipatterns is
+Ruby has no ThreadSanitizer; static detection of antipatterns is
 **`rubocop-thread_safety`**.
 
 ```yaml
@@ -183,33 +182,36 @@ rubocop --only ThreadSafety       # runs only the thread safety cops
 **What it catches**: class/module-level mutable state
 (`ThreadSafety/ClassAndModuleAttributes`,
 `ThreadSafety/InstanceVariableInClassMethod`,
-`ThreadSafety/ClassInstanceVariable`), mutable literal assigned to a class instance
-variable (`ThreadSafety/MutableClassInstanceVariable`), `Dir.chdir` with a
-process-wide effect (`ThreadSafety/DirChdir`), and a loose `Thread.new`
+`ThreadSafety/ClassInstanceVariable`), mutable literal assigned to a class
+instance variable (`ThreadSafety/MutableClassInstanceVariable`), `Dir.chdir`
+with a process-wide effect (`ThreadSafety/DirChdir`), and a loose `Thread.new`
 (`ThreadSafety/NewThread`). Catches the classic Rails antipatterns under
 Puma/Sidekiq.
 
-**What it does NOT catch**: **logical** database race (`find_or_create_by` without a unique
-index, lost update, check-then-act). No Ruby linter sees this — it only shows up in the
-**concurrency test** and in review. Catalog detail in
+**What it does NOT catch**: the **logical** database race (`find_or_create_by`
+without a unique index, lost update, check-then-act). No Ruby linter sees this —
+it shows up only in the **concurrency test** and in review. Catalog in
 `references/lint-detectors.md`.
 
 ## Ruby-specific anti-patterns
 
-- **"I have the GVL, therefore it's thread-safe"** — the GVL serializes bytecode, it does not
-  close the I/O window nor protect on JRuby/TruffleRuby. `@@x += 1` still gets it wrong.
-- **`find_or_create_by` / `first_or_create` without a unique index** — guaranteed TOCTOU
-  window; creates a duplicate under concurrency. Always `add_index ..., unique: true`.
+- **"I have the GVL, therefore it's thread-safe"** — the GVL serializes bytecode;
+  it does not close the I/O window nor protect on JRuby/TruffleRuby. `@@x += 1`
+  still gets it wrong.
+- **`find_or_create_by` / `first_or_create` without a unique index** — guaranteed
+  TOCTOU window; creates a duplicate under concurrency. Always
+  `add_index ..., unique: true`.
 - **Lazy memoization in a singleton** (`@cache ||= build`) shared between
-  threads — two threads can run `build` and/or see `@cache` half-built.
-  Use `Concurrent::Map`/`Mutex` or initialize at boot (eager).
-- **`@@class_variable` for application state** — shared by all
-  threads/subclasses; the mutation is not atomic. Prefer `Concurrent::*`.
-- **`save!` over a stale object** — persists the entire record with the values that
-  were in memory, overwriting concurrent changes. Use `update_all`,
-  `increment!`, `with_lock`, or optimistic locking.
+  threads — two threads can run `build` and/or see `@cache` half-built. Use
+  `Concurrent::Map`/`Mutex` or eager-init at boot.
+- **`@@class_variable` for application state** — shared by all threads/subclasses;
+  the mutation is not atomic. Prefer `Concurrent::*`.
+- **`save!` over a stale object** — persists the whole record with the in-memory
+  values, overwriting concurrent changes. Use `update_all`, `increment!`,
+  `with_lock`, or optimistic locking.
 - **Application mutex in a service with N processes** (Puma cluster, several dynos)
-  — it only serializes within one process. To serialize across processes use an
+  — serializes within one process only. To serialize across processes use an
   advisory lock or a database constraint, not `Mutex`.
-- **Swallowing `RecordNotUnique`/`StaleObjectError` without deciding a winner** — re-read and
-  reuse the winner's record (or retry on the stale); never ignore the error.
+- **Swallowing `RecordNotUnique`/`StaleObjectError` without picking a winner** —
+  re-read and reuse the winner's record (or retry on the stale); never ignore the
+  error.

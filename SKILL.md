@@ -1,19 +1,15 @@
 ---
 name: race-condition-guard
 description: |
-  Validates and prevents race conditions in concurrent code — in any
-  language. Covers double-submit, TOCTOU, lost update, check-then-act, data
-  race in shared memory, deadlock, and idempotency. Has per-language
-  references (Python, JavaScript/TypeScript, Java/Kotlin, C#/.NET, Go, Rust,
-  C/C++, Ruby, PHP, Swift, Dart/Flutter) with BAD→GOOD examples of how to avoid them and the lint/
-  static detectors of each ecosystem (go -race, ThreadSanitizer, SpotBugs,
-  Infer/RacerD, clippy/Miri, rubocop-thread_safety, VS Threading Analyzers).
-  Use when writing endpoints or workers that mutate shared state, reviewing
-  async/threads/goroutines/coroutines code, or building tests that fire
-  simultaneous operations and assert invariants. Triggers: "race condition",
-  "concurrency", "data race", "double submit", "lost update", "TOCTOU",
-  "deadlock", "thread safety", "idempotency", "lock", "mutex", "atomic",
-  "SELECT FOR UPDATE".
+  Use when writing or reviewing concurrent code that mutates shared state —
+  endpoints, workers, threads, goroutines, coroutines, async/await — or when
+  building tests that fire simultaneous operations and assert invariants. Covers
+  double-submit, TOCTOU, lost update, check-then-act, data race, deadlock, and
+  idempotency across many languages (Python, JS/TS, Java/Kotlin, C#, Go, Rust,
+  C/C++, Ruby, PHP, Swift, Dart) with per-language guards, examples, and lint
+  detectors. Triggers: "race condition", "concurrency", "data race", "double
+  submit", "lost update", "TOCTOU", "deadlock", "thread safety", "idempotency",
+  "lock", "mutex", "atomic".
 source: authored
 upstream: https://github.com/FelipeOFF/race-condition-guard-skill
 license: MIT
@@ -48,11 +44,15 @@ of how to avoid them and the **lint/detectors** of each ecosystem — lives in
    memory? GIL? event loop? process isolated per request?).
 2. **Classify the race** by the taxonomy below (check-then-act, lost update,
    data race, double-submit, lazy-init...).
-3. **Choose the guard** in the strategy table and apply the idiomatic version
+3. **Reuse before you build.** Search the codebase for an existing guard or
+   utility (lock helper, debounce/click-handler, idempotency middleware,
+   atomic-update wrapper, unique constraint) and prefer it — in any language.
+   Only add a new one if none exists. See `references/detection-workflow.md`.
+4. **Choose the guard** in the strategy table and apply the idiomatic version
    for the language — see `references/<language>.md` for the `BAD→GOOD` example.
-4. **Prove with a concurrency test** that fires simultaneous operations and
+5. **Prove with a concurrency test** that fires simultaneous operations and
    asserts the invariant (a sequential call does not reproduce the race).
-5. **Turn on the language's** static/dynamic detector (`references/lint-detectors.md`).
+6. **Turn on the language's** static/dynamic detector (`references/lint-detectors.md`).
 
 Detailed procedure for applying this to an existing codebase: `references/detection-workflow.md`.
 
@@ -140,20 +140,14 @@ Didn't find the exact language? Use the file of the closest runtime + the
 
 ## Lint & static detection
 
-Before saying "it's safe", **turn on the language's detector**. Full catalog
-(installation, config, what each one catches and what it doesn't) in
-`references/lint-detectors.md`. Mental shortcut:
-
-- **Go** has the best: `go test -race` instruments memory accesses and fails on a real data race.
-- **C/C++/Swift/Go** → **ThreadSanitizer** (TSan) in an instrumented build.
-- **Java/Kotlin/C/C++/ObjC** → **Infer (RacerD)** does inter-procedural race analysis.
-- **Java** → SpotBugs (`MT_CORRECTNESS`), Error Prone with `@GuardedBy`.
-- **C#** → `Microsoft.VisualStudio.Threading.Analyzers`.
-- **Rust** → the compiler already blocks data races; `clippy` + Miri + `loom` for the rest.
-- **Ruby** → `rubocop-thread_safety`. **Python/JS/PHP** → weak lint for races; rely on **concurrency test + database guard**.
-
-A static detector does **not replace** the concurrency test — it complements it.
-A logical race at the database layer is almost never caught by a linter; only by test and review.
+Before claiming "it's safe", **turn on the language's detector** — full catalog
+(install, config, coverage) in `references/lint-detectors.md`. Quick signal:
+**Go** `go test -race` and **C/C++/Swift** ThreadSanitizer catch real data races;
+**Java/Kotlin/C/C++** add Infer/RacerD and SpotBugs (`MT_CORRECTNESS`); **C#** the
+VS Threading Analyzers; **Rust** the compiler + `clippy`/Miri/`loom`; **Ruby**
+`rubocop-thread_safety`. **Python/JS/PHP** have weak race lint — rely on the
+concurrency test + database guard. A detector complements but never replaces the
+concurrency test: a logical database race is caught only by test and review.
 
 ## Validate with a concurrency test (the guardrail)
 

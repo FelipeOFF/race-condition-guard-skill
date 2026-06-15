@@ -2,19 +2,19 @@
 
 ## Concurrency model
 
-PHP-FPM is **shared-nothing per request**: each request runs in an isolated process,
-without sharing memory. For this reason **memory data races barely exist** in the
-process — there is no concurrent thread touching the same variable. The race lives
-**outside**: in the **database**, in the **shared cache** (Redis/Memcached), in the
-**session** and in **files**. Two simultaneous requests (or the same POST
-resubmitted) cross the TOCTOU window in that external state. Swoole/parallel/
-pthreads bring real threads and then yes there is a memory data race — a separate case at the end.
+PHP-FPM is **shared-nothing per request**: each request runs in an isolated process
+without shared memory. So **memory data races barely exist** in the process — no
+concurrent thread touches the same variable. The race lives **outside**: in the
+**database**, the **shared cache** (Redis/Memcached), the **session**, and **files**.
+Two simultaneous requests (or a resubmitted POST) cross the TOCTOU window in that
+external state. Swoole/parallel/pthreads bring real threads, so then a memory data
+race does exist — a separate case at the end.
 
 ## The races you will encounter
 
 - **Memory data race** — rare. Only in long-running runtimes with real threads:
   ext-`parallel`, Swoole coroutines/workers, `pcntl_fork` sharing a resource.
-  In classic PHP-FPM, it **does not happen** (state dies at the end of the request).
+  In classic PHP-FPM it **does not happen** (state dies at end of request).
 - **Logical race (the general rule)** — check-then-act crossing I/O:
   - **Lost update** in the database: `SELECT balance` → decide in PHP → `UPDATE`.
   - **Double-submit**: two POSTs create two records that should be one.
@@ -151,23 +151,23 @@ Cache::lock("close-books:$day", 10)->block(5, function () {
 
 | Primitive | Layer | When to use |
 |---|---|---|
-| `UPDATE ... WHERE x >= n` + `rowCount()` | Database (PDO) | Balance/stock/counter — closes the window without a lock |
-| `PDO::beginTransaction` + `SELECT ... FOR UPDATE` | Database (PDO) | Check-then-act with logic that does not fit in an UPDATE |
+| `UPDATE ... WHERE x >= n` + `rowCount()` | Database (PDO) | Balance/stock/counter — closes the window lock-free |
+| `PDO::beginTransaction` + `SELECT ... FOR UPDATE` | Database (PDO) | Check-then-act with logic that won't fit in an UPDATE |
 | `UNIQUE` index + catch `PDOException` 23000 | Database | Double-submit, uniqueness, idempotency key |
 | `DB::transaction(...)` | Laravel | Wraps read+write; rolls back on throw |
 | `->lockForUpdate()` | Eloquent | Pessimistic row lock inside the transaction |
-| `->sharedLock()` | Eloquent | Lock for consistent read (others read, nobody writes) |
-| `Model::increment()/decrement()` | Eloquent | Atomic counter UPDATE (does not read first) |
+| `->sharedLock()` | Eloquent | Lock for consistent read (others read, none writes) |
+| `Model::increment()/decrement()` | Eloquent | Atomic counter UPDATE (no prior read) |
 | `Cache::lock($k, $ttl)->block()/->get()` | Laravel (Redis/DB) | Serialize by logical key across processes/replicas |
 | `$redis->set($k,$v,['NX','PX'=>$ms])` | Redis (phpredis) | Raw distributed lock, anti-stampede |
 | `flock($fp, LOCK_EX)` | File | Serialize writes to the same file across processes |
-| `session_write_close()` | Session | Release the session lock early (avoid serializing requests pointlessly) |
+| `session_write_close()` | Session | Release the session lock early (avoid serializing requests) |
 
 ## Prove the guard
 
-PHP-FPM is one process per request — the test **must** fire real and
-simultaneous HTTP requests against the shared state. A sequential PHPUnit loop
-does not reproduce the race. Use a concurrent Guzzle pool and assert the invariant.
+PHP-FPM is one process per request, so the test **must** fire real, simultaneous
+HTTP requests against the shared state. A sequential PHPUnit loop won't reproduce
+the race. Use a concurrent Guzzle pool and assert the invariant.
 
 ```php
 // tests/Feature/ConcurrentDebitTest.php  (PHPUnit + Guzzle pool)
@@ -208,14 +208,14 @@ final class ConcurrentDebitTest extends TestCase
 ```
 
 Quick alternative without a test framework, for a local smoke test: `seq 50 | xargs
--P50 -I{} curl -s -X POST localhost:8080/accounts/1/debit -d 'amount=10'` and
-then check the balance. `-P50` is the parallel start.
+-P50 -I{} curl -s -X POST localhost:8080/accounts/1/debit -d 'amount=10'`, then
+check the balance. `-P50` is the parallel start.
 
 ## Lint & static detection
 
-PHPStan and Psalm focus on **types and flow**, not on concurrency — there is no
+PHPStan and Psalm focus on **types and flow**, not concurrency — there is no
 ThreadSanitizer nor `-race` for PHP. They **do not catch** lost update, database
-TOCTOU, nor cache stampede. What they do catch is indirect and still useful:
+TOCTOU, or cache stampede. What they catch is indirect but still useful:
 
 ```bash
 vendor/bin/phpstan analyse src --level=max   # unhandled exception, ignored error branch
@@ -224,30 +224,30 @@ vendor/bin/psalm                              # swallowed PDOException, unchecke
 
 - **PHPStan/Psalm/Larastan** flag a missing `catch` around the `INSERT` and a
   discarded `rowCount()`/return — a type heuristic, not race detection.
-- **There is no** PHP linter that detects a logical database/cache race. The real
-  defense is **a guard in the database (UNIQUE/FOR UPDATE/atomic UPDATE) + a lock in Redis + a
+- **No** PHP linter detects a logical database/cache race. The real defense is
+  **a guard in the database (UNIQUE/FOR UPDATE/atomic UPDATE) + a lock in Redis + a
   concurrency test**. See `references/databases-sql.md` and `references/lint-detectors.md`.
 
 ## PHP-specific anti-patterns
 
 - **`unique:users` (validation) as the only guard** — it is a `SELECT`; two
-  requests pass before the `INSERT`. It only closes with a **UNIQUE index** in the schema.
-- **`firstOrCreate` / `updateOrCreate` without a UNIQUE index** — they have a TOCTOU window
+  requests pass before the `INSERT`. Only a **UNIQUE index** in the schema closes it.
+- **`firstOrCreate` / `updateOrCreate` without a UNIQUE index** — a TOCTOU window
   underneath (SELECT then INSERT). Under a race they create a duplicate; they need the
-  unique index for the INSERT to collide and Eloquent to re-resolve.
+  unique index so the INSERT collides and Eloquent re-resolves.
 - **`lockForUpdate()` outside `DB::transaction`** — without an open transaction the lock
-  holds nothing; the `FOR UPDATE` is released at the end of the statement.
+  holds nothing; `FOR UPDATE` is released at the end of the statement.
 - **Forgetting `rowCount()`** after the atomic UPDATE — without checking affected
   rows, "lost the race" passes as a silent success.
-- **Cache::lock only in the application with the `array`/`file` driver per node** — it does not
+- **Cache::lock only in the app with the `array`/`file` driver per node** — it doesn't
   serialize across replicas. Use the Redis/database driver for a real distributed lock.
-- **Transaction opened without `rollBack` in the catch** — the connection is left with a hanging
-  transaction and the next use of the pool inherits dirty state.
-- **Session lock holding requests** — `$_SESSION` is file-locked until
-  the request ends; parallel AJAX from the same session serializes. Call
-  `session_write_close()` early when you will no longer write to the session.
+- **Transaction opened without `rollBack` in the catch** — leaves the connection with a
+  hanging transaction; the next use of the pool inherits dirty state.
+- **Session lock holding requests** — `$_SESSION` is file-locked until the request
+  ends; parallel AJAX from the same session serializes. Call `session_write_close()`
+  early when you will no longer write to the session.
 - **Writing a file without `flock($fp, LOCK_EX)`** — two FPM processes corrupt
-  the content. `file_put_contents(..., LOCK_EX)` or explicit `flock`.
+  the content. Use `file_put_contents(..., LOCK_EX)` or explicit `flock`.
 - **(Swoole/parallel) treating a long-running worker variable as request-scoped**
   — in a persistent runtime the state **survives** between requests and becomes shared
-  memory; there Swoole's mutex/atomic apply, not the habits of PHP-FPM.
+  memory; there Swoole's mutex/atomic apply, not PHP-FPM habits.

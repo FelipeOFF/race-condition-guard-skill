@@ -1,9 +1,8 @@
 # Lint & race condition detector catalog
 
-Tools that help **find** races by language — static (they read the
-code) and dynamic (they instrument execution). Each has a ceiling: none
-catches **logical** races at the database/cache layer. A detector complements
-concurrency testing, never replaces it.
+Tools to **find** races by language — static (read the code) and dynamic
+(instrument execution). Each has a ceiling: none catches **logical** races at the
+database/cache layer. A detector complements concurrency testing, never replaces it.
 
 ## Summary: what exists per language
 
@@ -25,8 +24,8 @@ concurrency testing, never replaces it.
 
 ### Go — `go test -race` (the best on the market)
 
-Instruments every memory access and **fails the test on the first real data
-race** observed at runtime. Cost: ~2-10× slower, ~5-10× more memory.
+Instruments every memory access and **fails the test on the first real data race**
+at runtime. Cost: ~2-10× slower, ~5-10× more memory.
 
 ```bash
 go test -race ./...
@@ -34,8 +33,8 @@ go build -race ./...      # instrumented binary to run in staging
 go vet ./...              # copylocks: structs with mutex copied by value
 ```
 
-Limit: only detects what **executes**. The test must exercise the concurrent
-path. Combine with `staticcheck` for static analysis.
+Limit: only detects what **executes** — the test must exercise the concurrent path.
+Combine with `staticcheck` for static analysis.
 
 ### C / C++ — ThreadSanitizer + Helgrind
 
@@ -46,13 +45,12 @@ valgrind --tool=helgrind ./app                              # alternative
 ```
 
 TSan is the same engine as Go's `-race`. It catches data races, some deadlocks,
-and invalid mutex uses. **Infer/RacerD** (`infer run -- make`) does
-inter-procedural static analysis without running the binary.
+and invalid mutex uses. **Infer/RacerD** (`infer run -- make`) does inter-procedural
+static analysis without running the binary.
 
 ### Rust — the compiler does the heavy lifting
 
-A data race between threads is a **compile error** (`Send`/`Sync` types). What
-remains:
+A data race between threads is a **compile error** (`Send`/`Sync` types). What remains:
 
 ```bash
 cargo clippy                       # lints, incl. concurrency patterns
@@ -68,8 +66,8 @@ swift build -Xswiftc -strict-concurrency=complete   # warns/errors on non-Sendab
 # Xcode: Scheme → Diagnostics → Thread Sanitizer
 ```
 
-In Swift 6 language mode the compiler **proves** the absence of data races in
-code checked by actor/`Sendable`. TSan covers legacy/`@unchecked` code.
+In Swift 6 language mode the compiler **proves** the absence of data races in code
+checked by actor/`Sendable`. TSan covers legacy/`@unchecked` code.
 
 ### Java / Kotlin
 
@@ -84,8 +82,8 @@ spotbugs -textui -effort:max -bugCategories MT_CORRECTNESS target/classes
 infer run -- ./gradlew build
 ```
 
-jcstress (OpenJDK) writes micro-tests that stress the memory model.
-IntelliJ has useful "Concurrency" inspections in the editor.
+jcstress (OpenJDK) writes micro-tests that stress the memory model. IntelliJ has
+useful "Concurrency" inspections in the editor.
 
 ### C# / .NET
 
@@ -95,7 +93,7 @@ IntelliJ has useful "Concurrency" inspections in the editor.
 ```
 
 They catch `.Result`/`.Wait()` (deadlock in a synchronization context), missing
-`ConfigureAwait`, access to an unawaited `Task`. Treat warnings as errors in CI
+`ConfigureAwait`, and access to an unawaited `Task`. Treat warnings as errors in CI
 (`<TreatWarningsAsErrors>true`).
 
 ### Ruby — `rubocop-thread_safety`
@@ -106,12 +104,12 @@ gem install rubocop-thread_safety
 rubocop --only ThreadSafety
 ```
 
-Catches class variables (`@@x`), mutation of shared constants/structures,
-and mutable global instances — the classic Rails antipatterns under threads.
+Catches class variables (`@@x`), mutation of shared constants/structures, and
+mutable global instances — the classic Rails antipatterns under threads.
 
 ### Python — weak lint, strong test
 
-There is no ThreadSanitizer for Python. Use:
+No ThreadSanitizer for Python. Use:
 
 ```bash
 ruff check .                     # catches some async patterns
@@ -119,8 +117,8 @@ flake8 --select=ASYNC            # flake8-async: await under a lock, sleep in as
 bandit -r .                      # security, includes some file TOCTOU
 ```
 
-The real race detector in Python is the **concurrency test** (threads/asyncio
-with a barrier) + **database guard**.
+The real race detector in Python is the **concurrency test** (threads/asyncio with
+a barrier) + **database guard**.
 
 ### JavaScript / TypeScript
 
@@ -132,23 +130,22 @@ with a barrier) + **database guard**.
 }}
 ```
 
-In Node the race is almost always **logical** (await in the middle of a
-read-modify-write) or in the **database**. TypeScript does not detect races.
-Rely on `async-mutex`/locks and on a database guard.
+In Node the race is almost always **logical** (await mid read-modify-write) or in
+the **database**. TypeScript does not detect races. Rely on `async-mutex`/locks and
+a database guard.
 
 ### PHP
 
-PHPStan and Psalm focus on types, not concurrency. Since each request runs
-isolated (PHP-FPM), the race lives in the **shared database/cache** — the defense
-is `SELECT ... FOR UPDATE`, an atomic lock in Redis, or a constraint. No linter
-replaces that.
+PHPStan and Psalm focus on types, not concurrency. Since each request runs isolated
+(PHP-FPM), the race lives in the **shared database/cache** — the defense is
+`SELECT ... FOR UPDATE`, an atomic Redis lock, or a constraint. No linter replaces that.
 
 ### Dart / Flutter
 
-Isolates do not share mutable memory (they communicate by message), so there is
-no memory data race — and no dynamic detector for that. The race is **logical**
-(a window in the `await` inside the isolate) or in the **database**. The static
-analyzer catches the most dangerous async antipatterns:
+Isolates do not share mutable memory (they communicate by message), so there is no
+memory data race — and no dynamic detector for it. The race is **logical** (a window
+in the `await` inside the isolate) or in the **database**. The static analyzer catches
+the most dangerous async antipatterns:
 
 ```yaml
 # analysis_options.yaml
@@ -164,17 +161,16 @@ dart analyze            # runs the lints from analysis_options.yaml
 flutter analyze         # same in a Flutter project
 ```
 
-`use_build_context_synchronously` catches the real case of using `BuildContext`
-after an `await` (the widget may have been unmounted in the meantime). The real
-race detector in Dart is the **concurrency test** (`Future.wait` of N operations)
-+ a database guard.
+`use_build_context_synchronously` catches using `BuildContext` after an `await` (the
+widget may have unmounted meanwhile). The real race detector in Dart is the
+**concurrency test** (`Future.wait` of N operations) + a database guard.
 
 ## Recommended CI policy
 
-1. Run the language's **dynamic** detector on the suite (`-race`, TSan) — that's
-   what catches a real data race.
+1. Run the language's **dynamic** detector on the suite (`-race`, TSan) — that's what
+   catches a real data race.
 2. Run the **static** one (SpotBugs/Infer/analyzers/clippy) as a PR gate.
-3. Keep at least **one concurrency test** per critical invariant
-   (money, uniqueness, stock) running in CI.
-4. A green linter does **not** clear review: a logical database race only shows
-   up through careful reading and the concurrency test.
+3. Keep at least **one concurrency test** per critical invariant (money, uniqueness,
+   stock) in CI.
+4. A green linter does **not** clear review: a logical database race only surfaces
+   through careful reading and the concurrency test.
