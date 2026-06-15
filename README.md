@@ -33,6 +33,7 @@ examples of how to avoid + the lint/detectors of each ecosystem) lives in
 ```
 race-condition-guard/
   SKILL.md
+  CONTRIBUTING.md
   references/
     detection-workflow.md      lint-detectors.md      databases-sql.md
     python.md                  javascript-typescript.md
@@ -50,6 +51,13 @@ npx skills add git@github.com:FelipeOFF/race-condition-guard-skill.git -y
 
 Or through the [myskills](https://github.com/FelipeOFF/my-claude-code-skills)
 marketplace (`programming@myskills`), where the skill comes already vendored.
+
+## Contributing
+
+Adding a new language, guard strategy, or lint detector? See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) — it lists the exact files to change and
+where, the 7-section contract for a language reference, and the validation
+script to run before committing.
 
 ## License
 
