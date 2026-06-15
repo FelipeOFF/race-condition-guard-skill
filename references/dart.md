@@ -89,59 +89,45 @@ ElevatedButton(
   child: const Text('Pay'),
 );
 
-// GOOD: a reusable AsyncButton — the click handler owns its in-flight state, so
-// call sites pass an async action, never an ad-hoc bool. Guards re-entrancy AND self-disables.
-class AsyncButton extends StatefulWidget {
-  const AsyncButton({super.key, required this.onPressed, required this.child});
-  final Future<void> Function() onPressed;
-  final Widget child;
-  @override
-  State<AsyncButton> createState() => _AsyncButtonState();
-}
+// GOOD: a ClickHandler decoupled from the widget — wire it to ANY button's
+// onPressed, so you keep full control of the widget (no wrapper widget, no
+// flag at the call site). A time threshold drops rapid repeat taps; an optional
+// secondaryCheck adds an app-level gate (e.g. "not already submitting", "form valid").
+class ClickHandler {
+  ClickHandler({this.threshold = const Duration(milliseconds: 600)});
 
-class _AsyncButtonState extends State<AsyncButton> {
-  bool _busy = false;
-  Future<void> _handleTap() async {
-    if (_busy) return;                          // sync re-entrancy guard, before any await
-    setState(() => _busy = true);
-    try {
-      await widget.onPressed();
-    } finally {
-      if (mounted) setState(() => _busy = false); // mounted: no setState after dispose
-    }
+  final Duration threshold;     // exposed so tests can set a deterministic window
+  DateTime? _lastClickTime;
+
+  /// Runs [callback] only if enough time passed since the last accepted click
+  /// (>= threshold) AND [secondaryCheck] (when given) returns true. Otherwise
+  /// the tap is dropped. Returns whether the click was accepted.
+  Future<bool> handleClick(
+    Future<void> Function() callback, {
+    bool Function()? secondaryCheck,
+  }) async {
+    final now = DateTime.now();
+    final last = _lastClickTime;
+
+    if (last != null && now.difference(last) < threshold) return false; // repeat tap → ignore
+    if (secondaryCheck != null && !secondaryCheck()) return false;       // gate rejected → ignore
+
+    _lastClickTime = now;        // accepted: stamp BEFORE awaiting (closes the sync window)
+    await callback();
+    return true;
   }
-  @override
-  Widget build(BuildContext context) => ElevatedButton(
-        onPressed: _busy ? null : _handleTap,   // null disables the button while busy
-        child: _busy
-            ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
-            : widget.child,
-      );
 }
 
-// Call site: no flag, no setState, no try/finally — just the action.
-AsyncButton(onPressed: () => api.placeOrder(cart), child: const Text('Pay'));
+// Usage — your own fully-customizable button; the handler guards the tap.
+final _clicks = ClickHandler();
+ElevatedButton(
+  onPressed: () => _clicks.handleClick(
+    () => api.placeOrder(cart),
+    secondaryCheck: () => !controller.isSubmitting,   // optional app-level gate
+  ),
+  child: const Text('Pay'),
+);
 // UI defense doesn't replace the server guard: idempotency key + UNIQUE in the database.
-```
-
-For non-widget code (an MVVM controller, a service), the same single-flight as a
-plain primitive — the call site has no bool and the view watches `isBusy`:
-
-```dart
-// AsyncGuard: a 2nd call while one is in flight joins it instead of re-running.
-class AsyncGuard {
-  Future<void>? _inFlight;
-  bool get isBusy => _inFlight != null;
-  Future<void> run(Future<void> Function() action) {
-    final existing = _inFlight;
-    if (existing != null) return existing;            // 2nd call joins the in-flight run
-    return _inFlight = action().whenComplete(() => _inFlight = null);
-  }
-}
-
-// In a controller: the guard dedups taps; expose isBusy to drive the button state.
-final _placeOrder = AsyncGuard();
-Future<void> submit() => _placeOrder.run(() => api.placeOrder(cart));
 ```
 
 ```dart
@@ -170,7 +156,7 @@ Future<void> save(BuildContext context) async {
 | `Lock` (`package:synchronized`) | Serialize an **async critical region within 1 isolate** (cache init, local queue) |
 | Single-flight (cache the in-flight `Future` in a `Map`) | Deduplicate concurrent fetches for the same key (cache/API stampede) |
 | `Completer<T>` | Coordinate producer/consumer; expose 1 `Future` resolved by an external event |
-| `AsyncButton` widget / `AsyncGuard` single-flight | Double-submit in Flutter: a reusable click handler owns the in-flight state (UX defense, not server) |
+| `ClickHandler` (threshold + `secondaryCheck`) | Double-submit in Flutter: a reusable, widget-agnostic click handler debounces taps + app-level gate (UX defense, not server) |
 | `mounted` / `context.mounted` before `setState`/using `context` | After async gap in Flutter — avoids `setState` after `dispose` |
 | `Isolate.spawn` / `compute()` | Heavy CPU off the main isolate — no shared state, message passing |
 | `unawaited(...)` (`dart:async`) | **Conscious** fire-and-forget — silences `unawaited_futures` by showing intent |
