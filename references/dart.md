@@ -89,20 +89,59 @@ ElevatedButton(
   child: const Text('Pay'),
 );
 
-// GOOD: synchronous inFlight flag + disabled button; the 2nd tap falls into the guard
-bool _submitting = false;
-ElevatedButton(
-  onPressed: _submitting ? null : () async {  // null disables the button
-    setState(() => _submitting = true);        // state becomes synchronous BEFORE the await
+// GOOD: a reusable AsyncButton — the click handler owns its in-flight state, so
+// call sites pass an async action, never an ad-hoc bool. Guards re-entrancy AND self-disables.
+class AsyncButton extends StatefulWidget {
+  const AsyncButton({super.key, required this.onPressed, required this.child});
+  final Future<void> Function() onPressed;
+  final Widget child;
+  @override
+  State<AsyncButton> createState() => _AsyncButtonState();
+}
+
+class _AsyncButtonState extends State<AsyncButton> {
+  bool _busy = false;
+  Future<void> _handleTap() async {
+    if (_busy) return;                          // sync re-entrancy guard, before any await
+    setState(() => _busy = true);
     try {
-      await api.placeOrder(cart);
+      await widget.onPressed();
     } finally {
-      if (mounted) setState(() => _submitting = false); // mounted: avoids setState post-dispose
+      if (mounted) setState(() => _busy = false); // mounted: no setState after dispose
     }
-  },
-  child: const Text('Pay'),
-);
-// UI defense doesn't replace the guard on the server: idempotency key + UNIQUE in the database.
+  }
+  @override
+  Widget build(BuildContext context) => ElevatedButton(
+        onPressed: _busy ? null : _handleTap,   // null disables the button while busy
+        child: _busy
+            ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
+            : widget.child,
+      );
+}
+
+// Call site: no flag, no setState, no try/finally — just the action.
+AsyncButton(onPressed: () => api.placeOrder(cart), child: const Text('Pay'));
+// UI defense doesn't replace the server guard: idempotency key + UNIQUE in the database.
+```
+
+For non-widget code (an MVVM controller, a service), the same single-flight as a
+plain primitive — the call site has no bool and the view watches `isBusy`:
+
+```dart
+// AsyncGuard: a 2nd call while one is in flight joins it instead of re-running.
+class AsyncGuard {
+  Future<void>? _inFlight;
+  bool get isBusy => _inFlight != null;
+  Future<void> run(Future<void> Function() action) {
+    final existing = _inFlight;
+    if (existing != null) return existing;            // 2nd call joins the in-flight run
+    return _inFlight = action().whenComplete(() => _inFlight = null);
+  }
+}
+
+// In a controller: the guard dedups taps; expose isBusy to drive the button state.
+final _placeOrder = AsyncGuard();
+Future<void> submit() => _placeOrder.run(() => api.placeOrder(cart));
 ```
 
 ```dart
@@ -131,7 +170,7 @@ Future<void> save(BuildContext context) async {
 | `Lock` (`package:synchronized`) | Serialize an **async critical region within 1 isolate** (cache init, local queue) |
 | Single-flight (cache the in-flight `Future` in a `Map`) | Deduplicate concurrent fetches for the same key (cache/API stampede) |
 | `Completer<T>` | Coordinate producer/consumer; expose 1 `Future` resolved by an external event |
-| `inFlight` flag + `onPressed: null` | Double-submit in Flutter (UX defense, not server defense) |
+| `AsyncButton` widget / `AsyncGuard` single-flight | Double-submit in Flutter: a reusable click handler owns the in-flight state (UX defense, not server) |
 | `mounted` / `context.mounted` before `setState`/using `context` | After async gap in Flutter — avoids `setState` after `dispose` |
 | `Isolate.spawn` / `compute()` | Heavy CPU off the main isolate — no shared state, message passing |
 | `unawaited(...)` (`dart:async`) | **Conscious** fire-and-forget — silences `unawaited_futures` by showing intent |
